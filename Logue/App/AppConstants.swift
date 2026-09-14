@@ -373,6 +373,9 @@ enum AppConstants {
         static let postRecordingWaitTimeout: Duration = .seconds(5)
         /// Timeout for SpeechTranscriberEngine recognizer finalization
         static let recognizerFinalizationTimeout: Duration = .seconds(10)
+        /// Apple's SpeechTranscriber download for some languages never leaves
+        /// "Not Installing". Don't block live captions waiting for it.
+        static let speechAssetDownloadTimeout: Duration = .seconds(8)
 
         /// -- Accessibility / Cross-App --
         /// Brief yield before posting synthetic keyboard events (Cmd+V paste)

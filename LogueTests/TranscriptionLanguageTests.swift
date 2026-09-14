@@ -84,6 +84,44 @@ struct TranscriptionLanguageTests {
         #expect(match?.language.languageCode?.identifier == "de")
     }
 
+    @Test("Auto preferred language de uses canonical de-DE, not a bare de tag")
+    func autoBareLanguageCodeUsesCanonicalLocale() {
+        let locale = TranscriptionLanguage.auto.resolvedSpeechLocale(
+            preferredLanguages: ["de"],
+            fallback: Locale(identifier: "en-US")
+        )
+        #expect(locale.identifier == "de-DE" || locale.identifier == "de_DE")
+    }
+
+    @Test("speechLocaleCandidates prefer Apple's equivalent then other German locales")
+    func speechLocaleCandidatesOrder() {
+        let requested = Locale(identifier: "de-DE")
+        let equivalent = Locale(identifier: "de-DE")
+        let supported = [
+            Locale(identifier: "de-AT"),
+            Locale(identifier: "de-DE"),
+            Locale(identifier: "en-US"),
+        ]
+        let candidates = TranscriptionLanguage.speechLocaleCandidates(
+            requested: requested,
+            equivalent: equivalent,
+            supported: supported
+        )
+        #expect(candidates.first?.language.languageCode?.identifier == "de")
+        #expect(candidates.contains { $0.identifier == "de-AT" || $0.identifier == "de_AT" })
+        #expect(!candidates.contains { $0.language.languageCode?.identifier == "en" })
+    }
+
+    @Test("Apple Not Installing errors are treated as a missing SpeechTranscriber asset")
+    func speechAssetUnavailableDetection() {
+        #expect(
+            TranscriptionLanguage.isSpeechAssetUnavailable(
+                "transcription.de asset unavailable after attempted download, final state: Not Installing"
+            )
+        )
+        #expect(!TranscriptionLanguage.isSpeechAssetUnavailable("No compatible audio format found."))
+    }
+
     @Test("workingLocale keeps the request when Speech has not enumerated locales yet")
     func workingLocaleEmptySupported() {
         let requested = Locale(identifier: "de-DE")

@@ -94,6 +94,7 @@ struct MeetingWorkspaceView: View {
                         volatileText: recorder.isRecording ? recorder.volatileText : "",
                         bookmarks: meeting.bookmarks,
                         isLive: recorder.isRecording,
+                        captionsPending: recorder.isRecording && recorder.speechEngine == nil,
                         externalScrollTarget: $scrollToSegmentID,
                         onAddBookmark: { timestamp, label, color in
                             let bookmark = Bookmark(label: label, timestamp: timestamp, color: color)
@@ -250,7 +251,8 @@ extension MeetingWorkspaceView {
                 RecordingStatusView(
                     elapsedTime: recorder.elapsedTime,
                     audioLevel: recorder.audioLevel,
-                    isCapturingSystemAudio: recorder.isCapturingSystemAudio
+                    isCapturingSystemAudio: recorder.isCapturingSystemAudio,
+                    isMicActive: recorder.isMicActive
                 )
             }
         }
@@ -270,7 +272,7 @@ extension MeetingWorkspaceView {
                 } label: {
                     Image(systemName: recorder.isMicActive ? "mic.fill" : "mic.slash.fill")
                         .font(.caption)
-                        .foregroundStyle(recorder.isMicActive ? .primary : .secondary)
+                        .foregroundStyle(recorder.isMicActive ? AppThemeConstants.error : .secondary)
                 }
                 .help(recorder.isMicActive ? "Mute microphone" : "Unmute microphone")
             }
@@ -880,14 +882,14 @@ extension MeetingWorkspaceView {
 
 /// Compact recording status shown in the macOS toolbar during active recording.
 ///
-/// Says what is being captured; it does not offer to change it. The microphone has no indicator
-/// here because the mute button sitting beside this capsule already shows its state and is the one
-/// control for it — two mic glyphs an inch apart was what made automatic capture still look like a
-/// pair of toggles.
+/// Says what is being captured; it does not offer to change it. The mute button beside this
+/// capsule is the control; the mic glyph here is only status, so the level meter is not the
+/// only sign that the microphone is live.
 struct RecordingStatusView: View {
     let elapsedTime: TimeInterval
     let audioLevel: Float
     var isCapturingSystemAudio: Bool = false
+    var isMicActive: Bool = true
 
     var body: some View {
         HStack(spacing: 8) {
@@ -903,10 +905,16 @@ struct RecordingStatusView: View {
             AudioLevelMeter(level: audioLevel)
                 .frame(width: 64, height: 14)
 
+            Image(systemName: isMicActive ? "mic.fill" : "mic.slash.fill")
+                .font(.caption2)
+                .foregroundStyle(isMicActive ? AppThemeConstants.error : .secondary)
+                .accessibilityLabel(isMicActive ? "Microphone recording" : "Microphone muted")
+
             if isCapturingSystemAudio {
                 Image(systemName: "display")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .accessibilityLabel("System audio recording")
                     .help("Also capturing system audio")
             }
         }

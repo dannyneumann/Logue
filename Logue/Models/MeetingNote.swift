@@ -518,9 +518,53 @@ enum TranscriptionLanguage: String, CaseIterable, Identifiable {
                   let match = TranscriptionLanguage(rawValue: code),
                   match != .auto
             else { continue }
-            return preferredLocale
+            // Prefer the canonical Speech locale (`de-DE`) over a bare language
+            // tag (`de`). Apple's asset catalog names models `transcription.de`
+            // when the region is missing, and that download fails.
+            return match.locale ?? preferredLocale
         }
         return fallback
+    }
+
+    /// Locales to try for live ASR, in order: Apple's equivalent, then every
+    /// supported locale of the same language (`de-AT` after `de-DE`).
+    static func speechLocaleCandidates(
+        requested: Locale,
+        equivalent: Locale?,
+        supported: [Locale]
+    ) -> [Locale] {
+        var candidates: [Locale] = []
+        var seen = Set<String>()
+        func append(_ locale: Locale) {
+            let key = locale.identifier(.bcp47)
+            guard seen.insert(key).inserted else { return }
+            candidates.append(locale)
+        }
+        if let equivalent {
+            append(equivalent)
+        }
+        if let match = matchingLocale(for: requested, in: supported) {
+            append(match)
+        }
+        if let language = requested.language.languageCode?.identifier {
+            for locale in supported where locale.language.languageCode?.identifier == language {
+                append(locale)
+            }
+        }
+        if candidates.isEmpty {
+            append(requested)
+        }
+        return candidates
+    }
+
+    /// Apple's SpeechTranscriber download for some languages (German, Arabic, …)
+    /// fails with `transcription.<lang> … Not Installing` even when the locale is
+    /// listed as supported. Those errors should fall through to DictationTranscriber.
+    static func isSpeechAssetUnavailable(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("not installing")
+            || lower.contains("asset unavailable")
+            || lower.contains("asset not found")
     }
 
     /// Picks the closest installed Speech locale for `requested`.
