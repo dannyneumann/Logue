@@ -76,29 +76,30 @@ final class SpeechTranscriberEngine {
     // MARK: - Setup
 
     /// Set up the transcriber with the given locale and start listening for results.
-    /// - Parameter locale: The locale for transcription, or `nil` to use en-US default.
-    func setup(locale: Locale? = nil) async throws {
-        let targetLocale = locale ?? Locale(
-            components: .init(languageCode: .english, script: nil, languageRegion: .unitedStates)
+    /// - Parameters:
+    ///   - locale: Locale for live ASR. `nil` uses `Locale.current` (Mac language), not en-US.
+    ///   - allowLanguageFallback: When true (Auto), English locales may be used if the
+    ///     requested language has no Speech model. When false, a missing language fails.
+    func setup(locale: Locale? = nil, allowLanguageFallback: Bool = true) async throws {
+        let requestedLocale = locale ?? Locale.current
+        logger.info("Setting up SpeechTranscriber for locale: \(requestedLocale.identifier)")
+
+        var transcriber = makeTranscriber(locale: requestedLocale)
+
+        let resolvedLocale = try await resolveAndInstallLocale(
+            requested: requestedLocale,
+            transcriber: transcriber,
+            allowLanguageFallback: allowLanguageFallback
         )
-
-        logger.info("Setting up SpeechTranscriber for locale: \(targetLocale.identifier)")
-
-        transcriber = SpeechTranscriber(
-            locale: targetLocale,
-            transcriptionOptions: [],
-            reportingOptions: [.volatileResults],
-            attributeOptions: [.audioTimeRange]
-        )
-
-        guard let transcriber else {
-            logger.error("Failed to create SpeechTranscriber")
-            throw SpeechTranscriberError.failedToSetup
+        if resolvedLocale.identifier != requestedLocale.identifier
+            || resolvedLocale.identifier(.bcp47) != requestedLocale.identifier(.bcp47)
+        {
+            logger.info("Using Speech locale \(resolvedLocale.identifier) for request \(requestedLocale.identifier)")
+            transcriber = makeTranscriber(locale: resolvedLocale)
         }
 
+        self.transcriber = transcriber
         analyzer = SpeechAnalyzer(modules: [transcriber])
-
-        try await ensureModel(transcriber: transcriber, locale: targetLocale)
 
         analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
             compatibleWith: [transcriber]
@@ -239,10 +240,25 @@ final class SpeechTranscriberEngine {
 
     // MARK: - Model Management
 
-    private func ensureModel(transcriber: SpeechTranscriber, locale: Locale) async throws {
-        logger.info("Checking model availability for locale: \(locale.identifier)")
+    private func makeTranscriber(locale: Locale) -> SpeechTranscriber {
+        SpeechTranscriber(
+            locale: locale,
+            transcriptionOptions: [],
+            reportingOptions: [.volatileResults],
+            attributeOptions: [.audioTimeRange]
+        )
+    }
 
-        // Download if needed
+    /// Downloads the requested Speech model if needed, then returns the locale the
+    /// transcriber should actually run — without silently swapping a chosen language
+    /// for English.
+    private func resolveAndInstallLocale(
+        requested: Locale,
+        transcriber: SpeechTranscriber,
+        allowLanguageFallback: Bool
+    ) async throws -> Locale {
+        logger.info("Checking model availability for locale: \(requested.identifier)")
+
         if let downloader = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
             logger.info("Ensuring speech model is installed...")
             downloadProgress = downloader.progress
@@ -250,49 +266,19 @@ final class SpeechTranscriberEngine {
             logger.info("Speech model ready")
         }
 
-        // Check supported locales
         let supportedLocales = await SpeechTranscriber.supportedLocales
-
-        if supportedLocales.isEmpty {
-            logger.warning("No supported locales found — trying fallbacks")
-            for fallback in Self.fallbackLocales {
-                do {
-                    try await reserveLocale(fallback)
-                    logger.info("Fallback locale reserved: \(fallback.identifier)")
-                    return
-                } catch {
-                    continue
-                }
-            }
+        guard let localeToUse = TranscriptionLanguage.workingLocale(
+            requested: requested,
+            supported: supportedLocales,
+            fallbacks: Self.fallbackLocales,
+            allowLanguageFallback: allowLanguageFallback
+        )
+        else {
             throw SpeechTranscriberError.localeNotSupported
         }
 
-        // Find a supported locale
-        var localeToUse = locale
-        if await !isSupported(locale: locale) {
-            logger.info("Preferred locale not supported, trying fallbacks...")
-            var found = false
-            for fallback in Self.fallbackLocales where await isSupported(locale: fallback) {
-                localeToUse = fallback
-                found = true
-                break
-            }
-            guard found else {
-                throw SpeechTranscriberError.localeNotSupported
-            }
-        }
-
         try await reserveLocale(localeToUse)
-    }
-
-    // B2: Fixed — removed incorrect en-US fallback that made this always return true
-    private func isSupported(locale: Locale) async -> Bool {
-        let supported = await SpeechTranscriber.supportedLocales
-        let bcp47 = locale.identifier(.bcp47)
-        return supported.contains { supportedLocale in
-            supportedLocale.identifier == locale.identifier
-                || supportedLocale.identifier(.bcp47) == bcp47
-        }
+        return localeToUse
     }
 
     private func reserveLocale(_ locale: Locale) async throws {

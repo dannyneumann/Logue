@@ -360,17 +360,42 @@ extension MeetingWorkspaceView {
     }
 
     func startRecordingButton(for meeting: MeetingNote) -> some View {
-        Button {
-            startSmartRecording(for: meeting)
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "record.circle")
-                Text("Start")
+        let selected = TranscriptionLanguage.resolved(fromStored: meeting.transcriptionLanguage)
+        return ControlGroup {
+            Button {
+                startSmartRecording(for: meeting)
+            } label: {
+                Label("Start", systemImage: "record.circle")
             }
+            .keyboardShortcut("r", modifiers: .command)
+            .help("Start Recording (⌘R)")
+            .accessibilityLabel("Start recording")
+
+            Menu {
+                ForEach(TranscriptionLanguage.allCases) { language in
+                    Button {
+                        setMeetingLanguage(language, for: meeting)
+                    } label: {
+                        if language == selected {
+                            Label(language.label, systemImage: "checkmark")
+                        } else {
+                            Text(language.label)
+                        }
+                    }
+                }
+            } label: {
+                Text(selected.label)
+            }
+            .help("Recording language for this meeting. Defaults to Settings → General.")
+            .accessibilityLabel("Recording language")
+            .accessibilityValue(selected.label)
         }
-        .keyboardShortcut("r", modifiers: .command)
-        .accessibilityLabel("Start recording")
-        .help("Start Recording (⌘R)")
+    }
+
+    func setMeetingLanguage(_ language: TranscriptionLanguage, for meeting: MeetingNote) {
+        var updated = meeting
+        updated.transcriptionLanguage = language.rawValue
+        store.updateMeeting(updated)
     }
 
     func quickBookmarkButton(for meeting: MeetingNote) -> some View {
@@ -434,12 +459,20 @@ extension MeetingWorkspaceView {
         }
         Button {
             Task { @MainActor in
+                await store.generateAISummary(for: meeting.id)
+            }
+        } label: {
+            Label("Regenerate Smart Minutes", systemImage: "arrow.clockwise")
+        }
+        .disabled(meeting.segments.isEmpty || LLMEngineStatus.shared.isBusy)
+        Button {
+            Task { @MainActor in
                 await store.regenerateAITitle(for: meeting.id)
             }
         } label: {
             Label("Generate Title", systemImage: "sparkles")
         }
-        .disabled(meeting.segments.isEmpty)
+        .disabled(meeting.segments.isEmpty || LLMEngineStatus.shared.isBusy)
         Button {
             renameText = meeting.title
             showRenameAlert = true

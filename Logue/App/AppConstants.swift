@@ -104,6 +104,8 @@ enum AppConstants {
         static let memoryTopK = "agent.memoryTopK"
         /// Preferred TTS voice identifier (`AVSpeechSynthesisVoice.identifier`).
         static let ttsVoiceIdentifier = "agent.ttsVoiceIdentifier"
+        /// Default live-transcript language for new meetings (`TranscriptionLanguage.rawValue`).
+        static let defaultTranscriptionLanguage = "defaultTranscriptionLanguage"
     }
 
     enum ModelStorage {

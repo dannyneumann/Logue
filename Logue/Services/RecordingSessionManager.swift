@@ -383,9 +383,10 @@ final class RecordingSessionManager {
         }
 
         do {
-            let locale = TranscriptionLanguage(rawValue: meeting.transcriptionLanguage ?? "auto")?.locale
+            let language = TranscriptionLanguage.resolved(fromStored: meeting.transcriptionLanguage)
+            let locale = language.resolvedSpeechLocale()
             recordingLocale = locale
-            try await engine.setup(locale: locale)
+            try await engine.setup(locale: locale, allowLanguageFallback: language == .auto)
         } catch {
             errorMessage = RecordingError.speechEngineSetupFailed(error.localizedDescription).localizedDescription
             logger.error("Speech engine setup failed: \(error.localizedDescription, privacy: .public)")
