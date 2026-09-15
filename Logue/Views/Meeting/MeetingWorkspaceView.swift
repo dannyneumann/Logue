@@ -160,6 +160,9 @@ struct MeetingWorkspaceView: View {
             }
             .task(id: meeting.id) {
                 await takeAutoRecordRequest(for: meeting)
+                if !recorder.isRecording, store.pendingAutoRecord != meeting.id {
+                    await recorder.transcribeSavedRecordingIfEmpty(for: meeting.id)
+                }
             }
             // Retried whenever the recorder frees up — a rebuild finishing, or the previous
             // session finishing being written. The `.task` above re-runs on a change of meeting,
@@ -459,6 +462,7 @@ extension MeetingWorkspaceView {
                 systemImage: meeting.isArchived ? "tray.and.arrow.up" : "archivebox"
             )
         }
+        transcribeRecordingButton(for: meeting)
         Button {
             Task { @MainActor in
                 await store.generateAISummary(for: meeting.id)
@@ -497,6 +501,20 @@ extension MeetingWorkspaceView {
             showDeleteConfirmation = true
         } label: {
             Label("Delete Meeting", systemImage: "trash")
+        }
+    }
+
+    @ViewBuilder
+    func transcribeRecordingButton(for meeting: MeetingNote) -> some View {
+        if meeting.segments.isEmpty {
+            Button {
+                Task { @MainActor in
+                    await recorder.transcribeSavedRecordingIfEmpty(for: meeting.id)
+                }
+            } label: {
+                Label("Transcribe Recording", systemImage: "waveform")
+            }
+            .disabled(recorder.isDiarizing(for: meeting.id) || recorder.isRecording)
         }
     }
 

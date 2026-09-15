@@ -79,6 +79,16 @@ final class SpeechTranscriberEngine {
 
     // MARK: - Setup
 
+    /// Locales whose SpeechAnalyzer path already failed this process. Retrying it on the
+    /// next meeting only races a half-torn-down analyzer against the system recognizer.
+    private static var analyzerFailedLanguages = Set<String>()
+
+    /// Callbacks from a cancelled recognition task must not restart capture or emit
+    /// duplicate finals after `finish()` has moved on.
+    private var recognitionGeneration = 0
+    private var isFinishing = false
+    private var legacyFinishWaiter: CheckedContinuation<Void, Never>?
+
     /// Set up the transcriber with the given locale and start listening for results.
     /// - Parameters:
     ///   - locale: Locale for live ASR. `nil` uses `Locale.current` (Mac language), not en-US.
@@ -87,6 +97,13 @@ final class SpeechTranscriberEngine {
     func setup(locale: Locale? = nil, allowLanguageFallback: Bool = true) async throws {
         let requestedLocale = locale ?? Locale.current
         logger.info("Setting up live captions for locale: \(requestedLocale.identifier)")
+        let languageKey = requestedLocale.language.languageCode?.identifier ?? requestedLocale.identifier
+
+        if Self.analyzerFailedLanguages.contains(languageKey) {
+            logger.info("Skipping SpeechAnalyzer for \(languageKey) — it already failed this session")
+            try setupLegacyRecognizer(locale: requestedLocale)
+            return
+        }
 
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
@@ -107,6 +124,7 @@ final class SpeechTranscriberEngine {
                 try await group.next()
             }
         } catch {
+            Self.analyzerFailedLanguages.insert(languageKey)
             logger.error(
                 "SpeechAnalyzer unavailable: \(error.localizedDescription, privacy: .public); using system speech recognizer"
             )
@@ -214,7 +232,8 @@ final class SpeechTranscriberEngine {
     /// Finalize the transcription session. Call this after stopping audio capture.
     func finish() async {
         logger.info("Finishing transcription session...")
-        finishLegacyRecognizer()
+        isFinishing = true
+        await finishLegacyRecognizer()
         inputBuilder.finish()
 
         do {
@@ -232,6 +251,8 @@ final class SpeechTranscriberEngine {
             _ = await task.result
             timeoutTask.cancel()
         }
+        flushVolatileCaption()
+        recognitionGeneration += 1
         recognizerTask = nil
         liveCaption = nil
         analyzer = nil
@@ -240,8 +261,18 @@ final class SpeechTranscriberEngine {
         downloadProgress = nil
         totalFramesStreamed = 0
         streamSampleRate = 0
+        isFinishing = false
 
         logger.info("Transcription session cleaned up")
+    }
+
+    /// The system recognizer often keeps the whole utterance as a partial until audio ends.
+    /// Clearing `volatileText` without emitting it is how a meeting can show captions live
+    /// and save an empty transcript.
+    fileprivate func flushVolatileCaption() {
+        let leftover = volatileText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !leftover.isEmpty else { return }
+        applyCaption(text: leftover, isFinal: true, audioDriven: useAudioDrivenTiming)
     }
 }
 
@@ -419,32 +450,46 @@ extension SpeechTranscriberEngine {
             throw SpeechTranscriberError.localeNotSupported
         }
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        if recognizer.supportsOnDeviceRecognition {
-            request.requiresOnDeviceRecognition = true
-        }
+        let request = makeLegacyRequest(recognizer: recognizer)
 
         sessionStartDate = Date()
         lastSegmentEndTime = 0
+        isFinishing = false
         legacyRecognizer = recognizer
         legacyRequest = request
         startLegacyTask(recognizer: recognizer, request: request)
         logger.info("System speech recognizer started for \(locale.identifier)")
     }
 
+    fileprivate func makeLegacyRequest(recognizer: SFSpeechRecognizer) -> SFSpeechAudioBufferRecognitionRequest {
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.taskHint = .dictation
+        if recognizer.supportsOnDeviceRecognition {
+            request.requiresOnDeviceRecognition = true
+        }
+        return request
+    }
+
     fileprivate func startLegacyTask(
         recognizer: SFSpeechRecognizer,
         request: SFSpeechAudioBufferRecognitionRequest
     ) {
+        recognitionGeneration += 1
+        let generation = recognitionGeneration
         legacyTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor [weak self] in
-                self?.handleLegacyResult(result, error: error)
+                self?.handleLegacyResult(result, error: error, generation: generation)
             }
         }
     }
 
-    fileprivate func handleLegacyResult(_ result: SFSpeechRecognitionResult?, error: Error?) {
+    fileprivate func handleLegacyResult(
+        _ result: SFSpeechRecognitionResult?,
+        error: Error?,
+        generation: Int
+    ) {
+        guard generation == recognitionGeneration else { return }
         if let result {
             applyCaption(
                 text: result.bestTranscription.formattedString,
@@ -452,37 +497,54 @@ extension SpeechTranscriberEngine {
                 audioDriven: false
             )
             if result.isFinal {
-                restartLegacyRecognition()
+                if isFinishing {
+                    completeLegacyFinishWait()
+                } else {
+                    restartLegacyRecognition()
+                }
             }
             return
         }
         if let error {
-            let nsError = error as NSError
-            if nsError.code == 216 || nsError.code == 209 { return }
+            if isFinishing {
+                completeLegacyFinishWait()
+                return
+            }
             logger.error("System speech recognizer error: \(error.localizedDescription, privacy: .public)")
             restartLegacyRecognition()
         }
     }
 
     fileprivate func restartLegacyRecognition() {
-        guard let recognizer = legacyRecognizer else { return }
+        guard !isFinishing, let recognizer = legacyRecognizer else { return }
         legacyRequest?.endAudio()
         legacyTask?.cancel()
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        if recognizer.supportsOnDeviceRecognition {
-            request.requiresOnDeviceRecognition = true
-        }
+        let request = makeLegacyRequest(recognizer: recognizer)
         legacyRequest = request
         startLegacyTask(recognizer: recognizer, request: request)
     }
 
-    fileprivate func finishLegacyRecognizer() {
-        legacyRequest?.endAudio()
+    fileprivate func finishLegacyRecognizer() async {
+        guard legacyRequest != nil || legacyTask != nil else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            legacyFinishWaiter = continuation
+            legacyRequest?.endAudio()
+            Task { @MainActor in
+                try? await Task.sleep(for: AppConstants.Delays.legacyRecognizerFinalTimeout)
+                self.completeLegacyFinishWait()
+            }
+        }
+        recognitionGeneration += 1
         legacyTask?.cancel()
         legacyTask = nil
         legacyRequest = nil
         legacyRecognizer = nil
+    }
+
+    fileprivate func completeLegacyFinishWait() {
+        guard let waiter = legacyFinishWaiter else { return }
+        legacyFinishWaiter = nil
+        waiter.resume()
     }
 }
 
